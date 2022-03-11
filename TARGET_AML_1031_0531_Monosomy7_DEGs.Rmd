@@ -1,0 +1,394 @@
+---
+title: 'Monosomy 7 DEGs'
+author: "Jenny Smith"
+date: "March 30, 2019"
+output: html_document
+---
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height=5, fig.width=8, dpi = 600)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,'2019.02.19_Monosomy7_DEGs'))
+
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(ComplexHeatmap)
+library(DeGSEA)
+getwd()
+```
+
+```{r}
+# source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/DifferentialExpressionPipeline_01.07.19.r")
+```
+
+
+
+#Read in the Clinical Data
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_9.18.20.csv"))
+
+merged <- merged %>% 
+  filter(!is.na(USI), USI != "Unknown") #%>% 
+  # filter(!Reg. %in% c(773920,775026, 786948,799528)) %>% 
+  # filter(Eligibility_Comments != "remove")
+
+
+dim(merged)
+```
+
+```{r}
+manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_10.08.20.csv"))  %>% 
+  left_join(., select(merged,-Group,-Protocol,-Primary.Fusion,-Primary.CNV,  -Additional.Fusions.CNV),
+            by="USI") %>% 
+  mutate_at(vars(Age.Category,
+                 Primary.CNV,
+                 M7_AML,
+                 Cytogenetic.Category.1,
+                 Cytogenetic.Category.2,
+                 SNVs,Rare.Fusions), 
+            ~ifelse(is.na(.), Group, .)) #age.category has 81 unknowns?? seems off. 
+
+head(manifest)
+dim(manifest) #2646   15
+# table(manifest_all$Group, manifest$Tissue) 
+```
+
+
+#Read in the counts
+
+```{r}
+rbd.cts <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_2646Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.RDS"))
+
+rbd.cts <- as.data.frame(rbd.cts)
+rownames(rbd.cts) <- rbd.cts$Gene
+rbd.cts <- rbd.cts[,-1]
+
+dim(rbd.cts) #51573  2646
+head(rbd.cts[,1:5])
+```
+
+```{r }
+TPM <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_2646Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.RDS"))
+  
+dim(TPM) #51573 
+head(TPM[,1:5])
+```
+
+
+rbd.cts <- read.csv("~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_FractionalCounts.csv", row.names = 1)
+
+remove cell lines, MPN, flow sorted and replicate samples
+rbd.cts <- rbd.cts[,-grep("Kas|MV4|MPN|Sort|replicate", colnames(rbd.cts), ignore.case = TRUE)]
+
+change to only USI for colnames
+colnames(rbd.cts) <- str_split_fixed(colnames(rbd.cts),  "\\.", 5)[,3]
+
+
+head(rbd.cts[,1:5])
+dim(rbd.cts)
+cts <- readRDS("~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_1031_0531_Counts_List.RDS")
+
+
+#Gene References
+
+```{r}
+geneIDmap <- read.csv(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/GeneSymbol_Ensembl_ID_Conversion_GRCh37.69_FromBCCA.csv"))
+# dim(geneIDmap) # 58450     2
+head(geneIDmap)
+```
+
+```{r}
+chr7_genes <- read.delim("Ensembl_v101_Chr7_Genes.csv", sep="\t") %>% 
+  inner_join(., geneIDmap, by=c("Gene.stable.ID"="gene_id"))
+
+head(chr7_genes)
+
+dim(chr7_genes) #2876 genes (2697 by ENSG merge)
+```
+
+
+
+#Examine the Clinical Data and Define Groups
+
+```{r}
+# i <- intersect(rownames(merged), colnames(rbd.cts))
+# table(merged[i,]$monosomy.7, useNA = "always") #23 total 
+```
+
+```{r}
+samps <- manifest %>% 
+  filter(grepl("AML|NBM",Group), grepl("diagnostic|NBM", Time_point),
+         !is.na(Batch)) %>% 
+  filter(!grepl("_replicate",Sample)) %>% 
+  mutate(Mono7=case_when(
+    Primary.CNV== "monosomy7" ~ "monosomy7",
+    Primary.CNV=="NBM" ~ "NBM",
+    TRUE ~ "OtherAML")) %>%
+  mutate(USI1=USI,
+         USI=Sample,
+         BM.blasts=Bone.marrow.leukemic.blast.percentage....) %>% 
+  filter(Sample %in% colnames(rbd.cts)) %>% 
+  set_rownames(.$Sample)
+
+# table(samps$Primary.CNV)
+# table(samps$Batch)
+# table(samps$Mono7)
+# table(samps$Group)
+
+
+cols.colorbar <- c("Age.Category",
+          "Cytogenetic.Category.1",
+          "AML_Subtype",
+          "Primary.CNV",
+          # "BM.blasts", #need to update the color codes to include continuous variables. colorCodes_Aheatmap should skip numeric columns
+          "Mono7")
+
+head(samps[,1:5])
+dim(samps)
+```
+
+
+```{r}
+DEGs.chr7 <- twoGroups_DEGs(expnData = rbd.cts[,samps$Sample],
+                       clinData = samps[samps$Mono7 != "NBM", ],
+                       col = "Mono7", 
+                       ref = "OtherAML",
+                       GOI = chr7_genes$geneSymbol,
+                       Custom.Cols = cols.colorbar)
+
+table(DEGs.chr7$phenovector)
+# saveRDS(DEGs.chr7, "TARGET_AML_RBD_Monosomy7_vs_OtherAMLs_Chr7.RDS")
+```
+
+```{r}
+DEGs.chr7 <- twoGroups_DEGs(expnData = rbd.cts[,samps$Sample],
+                       clinData = samps[samps$Mono7 != "NBM", ],
+                       col = "Mono7", 
+                       ref = "OtherAML",
+                       GOI = chr7_genes$geneSymbol,
+                       Custom.Cols = cols.colorbar)
+
+table(DEGs.chr7$phenovector)
+# saveRDS(DEGs.chr7, "TARGET_AML_RBD_Monosomy7_vs_OtherAMLs_Chr7.RDS")
+```
+
+```{r}
+DEGs.chr7.df <- extract_DEGs(DEGs.chr7,anno = T, geneLevel = T)
+
+head(DEGs.chr7.df)
+tail(DEGs.chr7.df)
+table(DEGs.chr7.df$logFC > 1)
+# write.csv(DEGs.chr7.df,
+#           "DEGs/TARGET_AML_monosomy7_OtherAML_chr7_DEGs.csv",
+#           row.names = FALSE)
+```
+
+
+```{r}
+# pdf("TARGET_AML_monosomy7_OtherAML_chr7_DEGs_Heatmap.pdf", height = 10, width = 14)
+DEGs.chr7$Heatmap
+# dev.off()
+```
+
+```{r}
+samps %>% 
+  filter(Mono7=="monosomy7") %>% 
+  dplyr::select(Sample,BM.blasts,Blast.percent..by.flow.) %>% 
+  arrange(BM.blasts)
+```
+
+```{r}
+DEGs.vsNBM.chr7 <- twoGroups_DEGs(expnData = rbd.cts[,samps$Sample],
+                       clinData = samps[samps$Mono7 != "OtherAML", ],
+                       col = "Mono7", 
+                       ref = "NBM",
+                       GOI = chr7_genes$geneSymbol,
+                       Custom.Cols = cols.colorbar)
+
+table(DEGs.vsNBM.chr7$phenovector)
+
+saveRDS(DEGs.vsNBM.chr7, "TARGET_AML_RBD_Monosomy7_vs_NBM_Chr7.RDS")
+```
+
+```{r}
+DEGs.vsNBM.chr7.df <- extract_DEGs(DEGs.vsNBM.chr7,anno = T,geneLevel = T)
+
+head(DEGs.vsNBM.chr7.df)
+tail(DEGs.vsNBM.chr7.df)
+
+table(DEGs.vsNBM.chr7.df$logFC > 1)
+dim(DEGs.vsNBM.chr7.df) #321  33
+
+# write.csv(DEGs.vsNBM.chr7.df,
+#           "DEGs/TARGET_AML_monosomy7_NBM_chr7_DEGs.csv",
+#           row.names = FALSE)
+```
+
+```{r}
+# pdf("TARGET_AML_monosomy7_NBM_chr7_DEGs_Heatmap.pdf", height = 10, width = 14)
+DEGs.vsNBM.chr7$Heatmap
+# dev.off()
+```
+
+
+#Differential Expression Analysis
+
+##vs Other AMLs
+
+```{r}
+DEGs <- twoGroups_DEGs(expnData = rbd.cts,
+                       clinData = merged,
+                       col="monosomy.7", 
+                       ref = "No")
+
+table(DEGs$phenovector)
+# saveRDS(DEGs, "TARGET_AML_RBD_Monosomy7_vs_OtherAMLs.RDS")
+```
+
+```{r}
+DEGs <- readRDS("TARGET_AML_RBD_Monosomy7_vs_OtherAMLs.RDS")
+```
+
+
+```{r fig.height=10, fig.width=10}
+# tiff("TARGET_AML_Monosomy7_vs_OtherAMLs_Heatmap.tiff", height = 6, width = 10, units = "in", res=300)
+draw(DEGs$Heatmap)
+# dev.off()
+```
+
+
+```{r}
+DEGs.df <- extract_DEGs(DEGs, anno = TRUE, geneLevel = TRUE)
+
+head(DEGs.df)
+dim(DEGs.df)
+# write.csv(DEGs.df, "TARGET_AML_1031_monosomy7_vs_OtherAML_DEGs.csv", row.names = FALSE)
+```
+
+```{r fig.height=10, fig.width=10}
+cols.colorbar <- c("Cytogenetic.Category.1","Cytogenetic.Category.2", "SNVs","Rare.Fusions", "monosomy.7")
+
+HA <- create_HA_Labs_Hmap(expn=DEGs$dendrogram$TMMCPM,
+                          geneList = DEGs.df$gene, 
+                          goi = DEGs.df$gene[c(1:10,1538:1547)], 
+                          cc = colorCodes_aheatmap(df=merged[,cols.colorbar]), 
+                          CDE = merged,
+                          cols = cols.colorbar)
+
+hmap <- ComplexHmap(mat=DEGs$dendrogram$TMMCPM,
+                             name="Monosomy 7",
+                             hmap_anno_obj=HA$annoColumn,
+                             colorbar.height=6,
+                             dge_dendrograms.res=DEGs$dendrogram)
+# tiff("TARGET_AML_Monosomy7_vs_OtherAMLs_del5q_Heatmap.tiff", height = 6, width = 10, units = "in", res=300)
+draw(hmap)
+# dev.off()
+```
+
+
+```{r}
+table(merged[names(DEGs$phenovector),]$NUP98.NSD1, merged[names(DEGs$phenovector),]$del5q)
+table(merged[names(DEGs$phenovector),]$Cytogenetic.Category.1, merged[names(DEGs$phenovector),]$del5q)
+```
+
+
+
+
+##vs NBM
+
+
+```{r}
+DEGs.NBM <- twoGroups_DEGs(expnData = rbd.cts,
+                       clinData = merged,
+                       col="monosomy.7", 
+                       ref = "No",
+                       BM = TRUE)
+
+
+# saveRDS(DEGs.NBM, "TARGET_AML_RBD_Monosomy7_vs_NBM.RDS")
+summary(DEGs.NBM)
+```
+
+```{r}
+DEGs.NBM <- readRDS("TARGET_AML_RBD_Monosomy7_vs_NBM.RDS")
+
+table(DEGs.NBM$phenovector)
+```
+
+```{r}
+DEGs.NBM.df <- extract_DEGs(DEGs.NBM, anno = TRUE, geneLevel = TRUE)
+
+# write.csv(DEGs.NBM.df, "TARGET_AML_monosomy7_vs_NBM_DEGs.csv", row.names = FALSE)
+head(DEGs.NBM.df)
+```
+
+```{r fig.height=6, fig.width=10}
+# tiff("TARGET_AML_RBD_Monosomy7_vs_NBM_Heatmap.tiff", height = 8, width = 10,units="in", res=300)
+draw(DEGs.NBM$Heatmap)
+# dev.off()
+```
+
+
+#GSEA 
+
+```{r}
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/GAGE_GSEA_Function.r")
+```
+
+```{r}
+system("sbatch -e mono7.GAGE.stderr -o mono7.Gage.out -t 0-1 -n 1 -c 4 ~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Rare_Variants/gage_Monosomy7.r")
+```
+
+```{r}
+system("sbatch -e mono7.GAGE.stderr -o mono7.Gage.out -t 0-1 -n 1 -c 4 ~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Rare_Variants/gage_Monosomy7.r")
+```
+
+```{r}
+files <- dir("GAGE/", pattern = "*.RDS") %>% 
+  grep("HSA|C2.All|BioP", ., value=TRUE)
+
+
+files
+```
+
+```{r}
+res <- list()
+for (file in files){
+  filename <- gsub("RDS", "csv", file)
+  n <- paste(str_split_fixed(file, pattern="_", n=10)[,c(4:6,9)], collapse = "_") %>%
+    gsub(".RDS", "", .)
+  
+  res[[n]] <- readRDS(paste0("GAGE/", file))
+  
+  up <- res[[n]]$SigPaths.Up[,1:5]
+  dn <- res[[n]]$SigPaths.Dn[,1:5]
+  
+  write.csv(up, gsub("expn", "UpRegulated_Pathways", filename))
+  write.csv(dn, gsub("expn", "DownRegulated_Pathways", filename))
+  
+  
+}
+```
+
+
+
+
+#Session Information 
+
+```{r}
+sessionInfo()
+```
+
